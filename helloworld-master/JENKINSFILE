@@ -1,0 +1,54 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('GetCode') {
+            steps {
+                git 'https://github.com/nieve-web/helloworld.git'
+            }
+        }
+        stage('Build'){
+            steps {
+                echo 'NO HAY QUE COMPLETAR NADA, ESTO ES PYTHON'
+                bat "dir"
+            }
+        }
+        stage('Test')
+        {
+            parallel
+            {
+                stage('Unit'){
+                    steps{
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE'){
+                            bat '''
+                                set PYTHONPATH=%WORKSPACE%\\helloworld-master
+                                echo %PYTHONPATH%
+                                pytest %WORKSPACE%\\helloworld-master\\test\\unit --junitxml=%WORKSPACE%\\result-unit.xml
+                            ''' 
+                        }
+                    }
+                }
+
+                stage('Rest') {
+                    steps {
+                        bat '''
+                            set FLASK_APP=%WORKSPACE%\\helloworld-master\\app\\api.py
+                            START /B py -m flask run --host=127.0.0.1 --port=5000 > flask_output.log 2>&1
+                            START /B java -jar C:\\Users\\nefr\\wiremock-standalone-3.10.0.jar --port 9090 --root-dir  %WORKSPACE%\\helloworld-master\\test\\wiremock
+                            ping 127.0.0.1 -n 10 > nul
+                            pytest %WORKSPACE%\\helloworld-master\\test\\rest --junitxml=%WORKSPACE%\\result-rest.xml
+                        '''
+                    }
+                }
+                
+            }
+        }
+        
+
+        stage('Results'){
+            steps{
+                junit 'result*.xml'
+            }            
+        }
+    }
+}

@@ -1,0 +1,108 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Get Code') {
+            steps {
+                // Obtener código del repo
+                git 'https://github.com/nieve-web/helloworld.git'
+                echo "Workspace: ${WORKSPACE}"
+                bat '''
+                    whoami
+                    hostname
+                    dir
+                '''
+                stash name: 'code', includes: '**'
+            }
+        }
+    
+        stage('Build') {
+            steps {
+                echo "Workspace: ${WORKSPACE}"
+                bat '''
+                    whoami
+                    hostname
+                '''
+                echo 'Es Python. No hay que compilar nada!!!'
+            }
+        }
+        
+        stage('Tests') {
+            parallel {
+                stage('Unit') {
+                    agent { label 'agent1' }
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            unstash name: 'code'
+                            echo "Workspace: ${WORKSPACE}"
+                            bat '''
+                                whoami
+                                hostname
+                                set PYTHONPATH=%WORKSPACE%\\helloworld-master
+                                pytest %WORKSPACE%\\helloworld-master\\test\\unit --junitxml=%WORKSPACE%\\result-unit.xml
+                            '''
+                            stash name: 'unit-res', includes: 'result-unit.xml'
+                        }
+                    }
+                    post {
+                        cleanup {
+                            cleanWs()
+                        }
+                    }
+                }
+
+                stage('Rest') {
+                    agent { label 'agent2' }
+                    steps {
+                        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                            unstash name: 'code'
+                            echo "Workspace: ${WORKSPACE}"
+                            bat '''
+                                whoami
+                                hostname
+                                set FLASK_APP=%WORKSPACE%\\helloworld-master\\app\\api.py
+                
+                                :: Iniciar Flask y capturar su PID
+                                start /b py -m flask run --host=127.0.0.1 --port=5000 > flask_output.log 2>&1
+                                for /f "tokens=2" %%a in ('tasklist /fi "imagename eq python.exe" /nh') do @echo %%a > flask.pid
+                
+                                :: Iniciar Wiremock y capturar su PID
+                                start /b java -jar C:\\Users\\nefr\\wiremock-standalone-3.10.0.jar --port 9090 --root-dir %WORKSPACE%\\helloworld-master\\test\\wiremock > wiremock_output.log 2>&1
+                                for /f "tokens=2" %%a in ('tasklist /fi "imagename eq java.exe" /nh') do @echo %%a > wiremock.pid
+                
+                                :: Ejecutar pruebas
+                                pytest %WORKSPACE%\\helloworld-master\\test\\rest --junitxml=%WORKSPACE%\\result-rest.xml
+                            '''
+                
+                            // Detener los procesos
+                            bat '''
+                                if exist flask.pid (for /F %%i in (flask.pid) do taskkill /PID %%i /F)
+                                if exist wiremock.pid (for /F %%i in (wiremock.pid) do taskkill /PID %%i /F)
+                            '''
+                            stash name: 'rest-res', includes: 'result-rest.xml'
+                        }
+                    }
+                    post {
+                        cleanup {
+                            cleanWs()
+                        }
+                    }
+                }
+            }
+        }
+          
+        stage('Results') {
+            steps {
+                unstash name: 'unit-res'
+                unstash name: 'rest-res'
+                junit 'result*.xml'
+            }
+            post {
+                cleanup {
+                    cleanWs()
+                }
+            }
+        }
+    }
+
+}
