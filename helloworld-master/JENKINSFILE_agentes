@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     stages {
-        stage('Get Code') {
+        stage('GetCode') {
             steps {
                 // Obtener código del repo
                 git 'https://github.com/nieve-web/helloworld.git'
@@ -15,22 +15,11 @@ pipeline {
                 stash name: 'code', includes: '**'
             }
         }
-    
-        stage('Build') {
-            steps {
-                echo "Workspace: ${WORKSPACE}"
-                bat '''
-                    whoami
-                    hostname
-                '''
-                echo 'Es Python. No hay que compilar nada!!!'
-            }
-        }
         
-        stage('Tests') {
+        stage('Tests'){
             parallel {
                 stage('Unit') {
-                    agent { label 'agent1' }
+                    agent { label 'agent-cp1b-1' }
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             unstash name: 'code'
@@ -39,20 +28,24 @@ pipeline {
                                 whoami
                                 hostname
                                 set PYTHONPATH=%WORKSPACE%\\helloworld-master
-                                pytest %WORKSPACE%\\helloworld-master\\test\\unit --junitxml=%WORKSPACE%\\result-unit.xml
+                                
+                                ::Las pruebas unitarias se lanzan una solo vez
+                                coverage run --branch --source=app --omit=%WORKSPACE%\\helloworld-master\\app\\__init__.py,%WORKSPACE%\\helloworld-master\\app\\api.py -m pytest %WORKSPACE%\\helloworld-master\\test\\unit --junitxml=%WORKSPACE%\\result-unit.xml
+                                coverage xml -o %WORKSPACE%\\coverage.xml
                             '''
-                            stash name: 'unit-res', includes: 'result-unit.xml'
+                            stash name: 'coverage-inf', includes: 'coverage.xml'
+                            junit 'result*.xml'
                         }
                     }
                     post {
                         cleanup {
                             cleanWs()
                         }
-                    }
+                    }               
                 }
 
-                stage('Rest') {
-                    agent { label 'agent2' }
+                stage('Rest') { 
+                    agent { label 'agent-cp1b-2' }
                     steps {
                         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                             unstash name: 'code'
@@ -62,47 +55,136 @@ pipeline {
                                 hostname
                                 set FLASK_APP=%WORKSPACE%\\helloworld-master\\app\\api.py
                 
-                                :: Iniciar Flask y capturar su PID
+                                :: Se levanta Flask en segundo plano y se captura su PID
                                 start /b py -m flask run --host=127.0.0.1 --port=5000 > flask_output.log 2>&1
                                 for /f "tokens=2" %%a in ('tasklist /fi "imagename eq python.exe" /nh') do @echo %%a > flask.pid
                 
-                                :: Iniciar Wiremock y capturar su PID
+                                :: Se levanta WireMock en segundo plano y se captura su PID
                                 start /b java -jar C:\\Users\\nefr\\wiremock-standalone-3.10.0.jar --port 9090 --root-dir %WORKSPACE%\\helloworld-master\\test\\wiremock > wiremock_output.log 2>&1
                                 for /f "tokens=2" %%a in ('tasklist /fi "imagename eq java.exe" /nh') do @echo %%a > wiremock.pid
                 
-                                :: Ejecutar pruebas
+                                ping 127.0.0.1 -n 5 > nul
+        
+                                :: Se ejecutan las pruebas REST
                                 pytest %WORKSPACE%\\helloworld-master\\test\\rest --junitxml=%WORKSPACE%\\result-rest.xml
                             '''
                 
-                            // Detener los procesos
+                            // Se apagan los servicios después de las pruebas
                             bat '''
-                                if exist flask.pid (for /F %%i in (flask.pid) do taskkill /PID %%i /F)
-                                if exist wiremock.pid (for /F %%i in (wiremock.pid) do taskkill /PID %%i /F)
+                                for /f %%a in (flask.pid) do taskkill /F /PID %%a
+                                for /f %%a in (wiremock.pid) do taskkill /F /PID %%a
+                                del flask.pid wiremock.pid
                             '''
-                            stash name: 'rest-res', includes: 'result-rest.xml'
                         }
                     }
                     post {
                         cleanup {
+                            sleep(time: 5, unit: 'SECONDS')  //tiempo necesario para que el servicio de flask y wiremock se detenga 
                             cleanWs()
                         }
+                    } 
+                }             
+             
+
+                stage('Static'){
+                    agent { label 'agent-cp1b-3' }
+                    steps {
+                        unstash name: 'code'
+                        echo "Workspace: ${WORKSPACE}"
+                        bat '''
+                            whoami
+                            hostname
+                            flake8 --exit-zero --format=pylint %WORKSPACE%\\helloworld-master\\app >flake8.out
+                        '''
+                        recordIssues tools: [flake8(name: 'Flake8', pattern: 'flake8.out')], qualityGates : [
+                            [threshold: 8, type: 'TOTAL', unstable: true], 
+                            [threshold: 10, type: 'TOTAL', unstable: false]
+                        ]
+        
                     }
+                    post {
+                        always {
+                            cleanWs()
+                        }
+                    } 
                 }
+        
+                stage('Security'){
+                    agent { label 'agent-cp1b-4' }
+                    steps{
+                        unstash name: 'code'
+                        echo "Workspace: ${WORKSPACE}"
+                        bat '''
+                            whoami
+                            hostname
+                            bandit --exit-zero -r . -f custom -o bandit.out --msg-template "{abspath}:{line}: [{test_id}] {msg}"
+                        '''
+                        recordIssues tools: [pyLint(name: 'Bandit', pattern: 'bandit.out')], qualityGates: [
+                            [threshold: 2, type: 'TOTAL', unstable: true], 
+                            [threshold: 4, type: 'TOTAL', unstable: false]
+                        ]
+                    }
+                    post {
+                        always {
+                            cleanWs()
+                        }
+                    } 
+                }             
             }
         }
-          
-        stage('Results') {
+
+       
+        stage('Coverage') {
             steps {
-                unstash name: 'unit-res'
-                unstash name: 'rest-res'
-                junit 'result*.xml'
+                unstash name: 'coverage-inf'
+                echo "Workspace: ${WORKSPACE}"
+                bat 'whoami'
+                bat 'hostname'
+                
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    cobertura coberturaReportFile: '**/coverage.xml',
+                              lineCoverageTargets: '100,0,85', 
+                              conditionalCoverageTargets: '100,0,80',
+                              onlyStable: false
+                }
             }
             post {
-                cleanup {
+                always {
                     cleanWs()
-                }
+                }             
             }
         }
-    }
+        
+        stage('Performance') {
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    echo "Workspace: ${WORKSPACE}"
+                    bat '''
+                        whoami
+                        hostname
+                        :: Se levanta Flask en segundo plano y se captura su PID
+                        set FLASK_APP=%WORKSPACE%\\helloworld-master\\app\\api.py
+                        start /b py -m flask run --host=127.0.0.1 --port=5000 > flask_output.log 2>&1
+                        for /f "tokens=2" %%a in ('tasklist /fi "imagename eq python.exe" /nh') do @echo %%a > flask.pid
+                        
+                        ping 127.0.0.1 -n 5 > nul
+                        
+                        C:\\apache-jmeter-5.6.3\\bin\\jmeter -n -t %WORKSPACE%\\helloworld-master\\test\\jmeter\\flask.jmx -f -l flask.jtl
+                        
+                        :: Detener Flask 
+                        for /f %%a in (flask.pid) do taskkill /PID %%a /F
+                        del flask.pid
+                    '''
+                    perfReport sourceDataFiles: '**/flask.jtl'
+                }
+            }
+            post {
+                always {
+                    sleep(time: 5, unit: 'SECONDS') //tiempo necesario para que el servicio de flask se detenga 
+                    cleanWs()
+                }             
+            }
+        }
 
+    }
 }
